@@ -6,7 +6,7 @@
 
 typedef struct HashTable HashTable;
 typedef struct HT_Entry {
-    const void const *key;
+    const void *key;
     void *value;
 } HT_Entry;
 typedef size_t (*HT_HashFunction)(const void*);
@@ -22,6 +22,8 @@ void *ht_remove(HashTable *table, const void *key);
 void *ht_insert(HashTable *table, const void *key, void *value);
 size_t ht_size(HashTable *table);
 
+HT_Entry *ht_entries(HashTable *table);
+
 #endif // _H_HASHTABLE_
 
 #ifdef HASHTABLE_IMPL
@@ -33,7 +35,8 @@ size_t ht_size(HashTable *table);
 
 typedef struct _ht_entry {
     size_t cached_hash;
-    HT_Entry entry;
+    const void *key;
+    void *value;
 } _ht_entry;
 
 struct HashTable {
@@ -41,6 +44,9 @@ struct HashTable {
     size_t count;
     HT_HashFunction hasher;
     HT_EqualityFunction eq;
+    // Null key is handled specially since normally null keys indicate an empty bucket
+    int null_present;
+    void *null;
     _ht_entry *table;
 };
 
@@ -106,17 +112,17 @@ static void *_ht_insert(
     // For each bucket, starting at the preferred bucket
     for (size_t i = entry.cached_hash % capacity ;; i = (i + 1) % capacity) {
         _ht_entry *bucket = &table[i];
-        if (!bucket->entry.key) {
+        if (!bucket->key) {
             // No key? Empty bucket!
             *bucket = entry;
             return NULL;
         } else if (
-            bucket->entry.key == entry.entry.key ||
-            bucket->cached_hash == entry.cached_hash && eq(bucket->entry.key, entry.entry.key)
+            bucket->key == entry.key ||
+            bucket->cached_hash == entry.cached_hash && eq(bucket->key, entry.key)
         ) {
             // Key matches bucket; replace value
-            void *old = bucket->entry.value;
-            bucket->entry.value = entry.entry.value;
+            void *old = bucket->value;
+            bucket->value = entry.value;
             return old;
         } else if (_ht_probe_distance(bucket->cached_hash, i, capacity) < _ht_probe_distance(entry.cached_hash, i, capacity)) {
             // Robin hood bucket stealing; now we need to find a new place for the
@@ -142,7 +148,7 @@ static void _ht_resize(HashTable *table, size_t new_capacity) {
         // there is a better way of doing this when we are simply
         // doubling the capacity but we're doing it the easy way for now.
         for (size_t i = 0; i < table->capacity; i++) {
-            if (table->table[i].entry.key) continue;
+            if (table->table[i].key) continue;
             void *displaced = _ht_insert(
                 new_table,
                 new_capacity,
@@ -163,6 +169,9 @@ void ht_ensure_capacity(HashTable *table, size_t minimum_capacity) {
 }
 
 void *ht_get(HashTable *table, const void *key) {
+    // Null key is handled specially
+    if (!key && table->null_present) return table->null;
+
     if (table->count == 0) return NULL;
 
     const size_t hash = table->hasher(key);
@@ -171,22 +180,29 @@ void *ht_get(HashTable *table, const void *key) {
         _ht_entry *bucket = &table->table[i];
         if (
             // Empty bucket terminates the list
-            !bucket->entry.key ||
+            !bucket->key ||
             // Encountering a bucket that would have been stolen if the entry existed also terminates the list
             _ht_probe_distance(hash, i, table->capacity) > _ht_probe_distance(bucket->cached_hash, i, table->capacity)
         ) {
             return NULL;
         } else if (
-            bucket->entry.key == key ||
-            bucket->cached_hash == hash && table->eq(bucket->entry.key, key)
+            bucket->key == key ||
+            bucket->cached_hash == hash && table->eq(bucket->key, key)
         ) {
             // Key matches; Found value
-            return bucket->entry.value;
+            return bucket->value;
         }
     }
 }
 
 void *ht_remove(HashTable *table, const void *key) {
+    if (!key) {
+        table->null_present = 0;
+        void *old = table->null;
+        table->null = NULL;
+        return old;
+    }
+
     if (table->count == 0) return NULL;
 
     const size_t hash = table->hasher(key);
@@ -195,30 +211,30 @@ void *ht_remove(HashTable *table, const void *key) {
         _ht_entry *bucket = &table->table[i];
         if (
             // Empty bucket terminates the list
-            !bucket->entry.key ||
+            !bucket->key ||
             // Encountering a bucket that would have been stolen if the entry existed also terminates the list
             _ht_probe_distance(hash, i, table->capacity) > _ht_probe_distance(bucket->cached_hash, i, table->capacity)
         ) {
             return NULL;
         } else if (
-            bucket->entry.key == key ||
-            bucket->cached_hash == hash && table->eq(bucket->entry.key, key)
+            bucket->key == key ||
+            bucket->cached_hash == hash && table->eq(bucket->key, key)
         ) {
             // Key matches; To remove value, shift the rest of
             // the entries not in their preferred bucket down.
-            void *old = bucket->entry.value;
+            void *old = bucket->value;
             for (
                 size_t next = (i + 1) % table->capacity
                 ;; // We use next like this because we could wrap
                 i = next, next = (i + 1) % table->capacity
             ) {
                 if (
-                    !table->table[next].entry.key ||
+                    !table->table[next].key ||
                     _ht_probe_distance(table->table[next].cached_hash, next, table->capacity) == 0
                 ) break;
                 table->table[i] = table->table[next];
             }
-            table->table[i] = (_ht_entry) { 0, { NULL, NULL }};
+            table->table[i] = (_ht_entry) { 0, NULL, NULL };
             table->count--;
             return old;
         }
@@ -226,6 +242,12 @@ void *ht_remove(HashTable *table, const void *key) {
 }
 
 void *ht_insert(HashTable *table, const void *key, void *value) {
+    if (!key) {
+        table->null_present = 1;
+        void *old = table->null;
+        table->null = value;
+        return old;
+    }
     if (table->capacity == 0) _ht_resize(table, DEFAULT_CAPACITY);
 
     // Resize when reaching 90% capacity
@@ -234,14 +256,32 @@ void *ht_insert(HashTable *table, const void *key, void *value) {
         _ht_resize(table, table->capacity * 2);
 
     void *old = _ht_insert(table->table, table->capacity, (_ht_entry) {
-        table->hasher(key), { key, value }
+        table->hasher(key), key, value
     }, table->eq);
     if (!old) table->count++;
     return old;
 }
 
 size_t ht_size(HashTable *table) {
-    return table->count;
+    return table->count + table->null_present;
+}
+
+HT_Entry *ht_entries(HashTable *table) {
+    size_t size = ht_size(table);
+    HT_Entry *entries = malloc(size * sizeof(HT_Entry));
+    size_t index = 0;
+    for (size_t i = 0; i < table->capacity; i++) {
+        if (table->table[i].key) {
+            entries[index++] = (HT_Entry) {
+                table->table[i].key,
+                table->table[i].value
+            };
+        }
+    }
+    if (table->null_present) {
+        entries[size - 1] = (HT_Entry) { NULL, table->null };
+    }
+    return entries;
 }
 
 #undef DEFAULT_CAPACITY
