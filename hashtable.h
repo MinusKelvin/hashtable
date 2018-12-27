@@ -148,7 +148,7 @@ static void _ht_resize(HashTable *table, size_t new_capacity) {
         // there is a better way of doing this when we are simply
         // doubling the capacity but we're doing it the easy way for now.
         for (size_t i = 0; i < table->capacity; i++) {
-            if (table->table[i].key) continue;
+            if (!table->table[i].key) continue;
             void *displaced = _ht_insert(
                 new_table,
                 new_capacity,
@@ -252,7 +252,7 @@ void *ht_insert(HashTable *table, const void *key, void *value) {
 
     // Resize when reaching 90% capacity
     // Doubling allows for amortized O(1) insertion
-    if (10 * table->count >= 9 * table->capacity)
+    if (10 * table->count >= 9 * table->capacity || table->count == table->capacity - 1)
         _ht_resize(table, table->capacity * 2);
 
     void *old = _ht_insert(table->table, table->capacity, (_ht_entry) {

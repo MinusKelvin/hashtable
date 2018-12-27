@@ -112,6 +112,7 @@ int main() {
 
     bar_baz_car(ht_clone(table));
     car_baz_bar(ht_clone(table));
+    baz_bar_car(ht_clone(table));
 
     ht_free(table);
 }
